@@ -3042,6 +3042,7 @@ void exit_mmap(struct mm_struct *mm)
 	struct mmu_gather tlb;
 	struct vm_area_struct *vma;
 	unsigned long nr_accounted = 0;
+	struct task_struct *vm_task;
 
 	/* mm's last user has gone, and its about to be pulled down */
 	mmu_notifier_release(mm);
@@ -3084,6 +3085,12 @@ void exit_mmap(struct mm_struct *mm)
 	vma = mm->mmap;
 	if (!vma)	/* Can happen if dup_mmap() received an OOM */
 		return;
+
+	/* Remove SMA pages from *pages_to_free* and free them */
+	vm_task = current->group_leader;
+	if (vm_task->sec_vm_info) {
+		atomic_set(&vm_task->sec_vm_info->is_exiting, 1);
+	}
 
 	lru_add_drain();
 	flush_cache_mm(mm);

@@ -56,6 +56,26 @@
 __asm__(".arch_extension	virt");
 #endif
 
+#define S_VISOR_MAX_SUPPORTED_PHYSICAL_CORE_NUM 4
+#define S_VISOR_MAX_SIZE_PER_CORE (2048 + 64)
+__attribute__((aligned(PAGE_SIZE))) uint64_t shared_register_pages[S_VISOR_MAX_SUPPORTED_PHYSICAL_CORE_NUM * S_VISOR_MAX_SIZE_PER_CORE];
+
+inline void *get_s_visor_shared_buf(void)
+{
+	return (shared_register_pages + smp_processor_id() * S_VISOR_MAX_SIZE_PER_CORE);
+}
+
+inline void *get_gp_reg_region(unsigned int core_id) {
+	uint64_t *ptr = shared_register_pages + core_id * S_VISOR_MAX_SIZE_PER_CORE;
+	return (void *)ptr;
+}
+
+inline kvm_smc_req_t *get_smc_req_region(unsigned int core_id) {
+	uint64_t *ptr = shared_register_pages + core_id * S_VISOR_MAX_SIZE_PER_CORE;
+	/* First 32 entries are for guest gp_regs */
+	return (kvm_smc_req_t *)(ptr + 32);
+}
+
 DEFINE_PER_CPU(kvm_cpu_context_t, kvm_host_cpu_state);
 static DEFINE_PER_CPU(unsigned long, kvm_arm_hyp_stack_page);
 
@@ -111,7 +131,29 @@ void kvm_arch_check_processor_compat(void *rtn)
 	*(int *)rtn = 0;
 }
 
+void trap_s_visor_enter_guest(u32 sec_vm_id, u32 vcpu_id)
+{
+	kvm_smc_req_t* smc_req = get_smc_req_region(smp_processor_id());
+	smc_req->sec_vm_id = sec_vm_id;
+	smc_req->vcpu_id = vcpu_id;
+	smc_req->req_type = REQ_KVM_TO_S_VISOR_GENERAL;
+}
 
+void boot_s_visor_secure_vm(u32 sec_vm_id, u64 nr_vcpu)
+{
+	/* Initialize *smc_req* in *kvm*. */
+	uint64_t qemu_s1ptp;
+	kvm_smc_req_t *smc_req;
+	asm volatile("mrs %0, ttbr0_el2\n\t" : "=r"(qemu_s1ptp));
+	smc_req = get_smc_req_region(smp_processor_id());
+	smc_req->sec_vm_id = sec_vm_id;
+	smc_req->req_type = REQ_KVM_TO_S_VISOR_BOOT;
+	smc_req->boot.qemu_s1ptp = qemu_s1ptp;
+	smc_req->boot.nr_vcpu = nr_vcpu;
+	local_irq_disable();
+	asm volatile("smc 0x18\n\t");
+	local_irq_enable();
+}
 /**
  * kvm_arch_init_vm - initializes a VM data structure
  * @kvm:	pointer to the KVM struct
@@ -147,6 +189,8 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 	kvm->arch.max_vcpus = vgic_present ?
 				kvm_vgic_get_max_vcpus() : KVM_MAX_VCPUS;
 
+	kvm->arch.sec_vm_id = 0;
+
 	return ret;
 out_free_stage2_pgd:
 	kvm_free_stage2_pgd(kvm);
@@ -171,6 +215,18 @@ vm_fault_t kvm_arch_vcpu_fault(struct kvm_vcpu *vcpu, struct vm_fault *vmf)
 	return VM_FAULT_SIGBUS;
 }
 
+void destroy_s_visor_secure_vm(u32 sec_vm_id)
+{
+	kvm_smc_req_t *smc_req;
+	int ret;
+	smc_req = get_smc_req_region(smp_processor_id());
+	smc_req->sec_vm_id = sec_vm_id;
+	smc_req->req_type = REQ_KVM_TO_S_VISOR_SHUTDOWN;
+	local_irq_disable();
+	asm volatile("smc 0x18\n\t");
+	local_irq_enable();
+	ret = sec_mem_compact_pool(0);
+}
 
 /**
  * kvm_arch_destroy_vm - destroy the VM data structure
@@ -179,6 +235,10 @@ vm_fault_t kvm_arch_vcpu_fault(struct kvm_vcpu *vcpu, struct vm_fault *vmf)
 void kvm_arch_destroy_vm(struct kvm *kvm)
 {
 	int i;
+
+	if (kvm->arch.sec_vm_id) {
+		destroy_s_visor_secure_vm(kvm->arch.sec_vm_id);
+	}
 
 	kvm_vgic_destroy(kvm);
 
@@ -1658,6 +1718,24 @@ void kvm_arch_irq_bypass_start(struct irq_bypass_consumer *cons)
 	kvm_arm_resume_guest(irqfd->kvm);
 }
 
+
+static inline void register_s_visor_shared_memory(void) {
+	asm volatile("mov x1, %0\n"::"r"(virt_to_phys(shared_register_pages)): "x1");
+	local_irq_disable();
+	asm volatile("smc #0x10\n");
+	local_irq_enable();
+}
+
+void flush_s_visor_shadow_page_tables() {
+	kvm_smc_req_t* kvm_smc_flush_req = get_smc_req_region(smp_processor_id());
+	kvm_smc_flush_req->req_type = REQ_KVM_TO_S_VISOR_FLUSH_IPA;
+	local_irq_disable();
+	asm volatile("smc #0x18\n");
+	local_irq_enable();
+}
+EXPORT_SYMBOL(flush_s_visor_shadow_page_tables);
+
+
 /**
  * Initialize Hyp-mode and memory mappings on all CPUs.
  */
@@ -1705,6 +1783,8 @@ int kvm_arch_init(void *opaque)
 		kvm_info("VHE mode initialized successfully\n");
 	else
 		kvm_info("Hyp mode initialized successfully\n");
+
+	register_s_visor_shared_memory();
 
 	return 0;
 

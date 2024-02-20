@@ -724,8 +724,29 @@ void release_pages(struct page **pages, int nr)
 	unsigned long uninitialized_var(flags);
 	unsigned int uninitialized_var(lock_batch);
 
+	bool is_sec_vm = false;
+	LIST_HEAD(sec_mem_pages);
+	struct task_struct *vm_task = current->group_leader;
+	struct sec_vm_info *svi = vm_task ? vm_task->sec_vm_info : NULL;
+	if (svi && atomic_read(&svi->is_exiting)) {
+		is_sec_vm = true;
+	}
+
 	for (i = 0; i < nr; i++) {
 		struct page *page = pages[i];
+		if (is_sec_vm && page->is_sec_mem) {
+			list_add(&page->lru, &sec_mem_pages);
+			continue;
+		} else if (page->is_sec_mem) {
+			pr_err("%s:%d NOT an exiting secure VM, pfn: %lx\n",
+					__func__, __LINE__, page_to_pfn(page));
+			list_add(&page->lru, &sec_mem_pages);
+			continue;
+		} else if (page_count(page) == 0) {
+			pr_err("%s:%d pfn: %lx count already is 0\n",
+					__func__, __LINE__, page_to_pfn(page));
+			continue;
+		}
 
 		/*
 		 * Make sure the IRQ-safe lock-holding time does not get
@@ -797,6 +818,20 @@ void release_pages(struct page **pages, int nr)
 		spin_unlock_irqrestore(&locked_pgdat->lru_lock, flags);
 
 	mem_cgroup_uncharge_list(&pages_to_free);
+
+	/*
+	 * All sec cma pages should be released here.
+	 * This should be the only way to free sec cma pages.
+	 * */
+	if (is_sec_vm) {
+		struct page *page_it, *next;
+		list_for_each_entry_safe(page_it, next, &sec_mem_pages, lru) {
+			if (page_it->is_sec_mem) {
+				list_del(&page_it->lru);
+				sec_mem_free_page(svi, page_it);
+			}
+		}
+	}
 	free_unref_page_list(&pages_to_free);
 }
 EXPORT_SYMBOL(release_pages);

@@ -100,6 +100,98 @@ alternative_else_nop_endif
 	eret
 ENDPROC(__guest_enter)
 
+/*
+ * u64 __guest_enter_s_visor_fastpath(struct kvm_vcpu *vcpu,
+ *		     struct kvm_cpu_context *host_ctxt, void *shared_page);
+ */
+ENTRY(__guest_enter_s_visor_fastpath)
+	// x0: vcpu
+	// x1: host context
+	// x2: shared_register_pages[core_id]
+	// x3-x17: clobbered by macros
+	// x18: guest context
+
+	// Store the host regs
+	save_callee_saved_regs x1
+
+	// Now the host state is stored if we have a pending RAS SError it must
+	// affect the host. If any asynchronous exception is pending we defer
+	// the guest entry. The DSB isn't necessary before v8.2 as any SError
+	// would be fatal.
+	alternative_if ARM64_HAS_RAS_EXTN
+	dsb	nshst
+	isb
+	alternative_else_nop_endif
+	mrs	x1, isr_el1
+	cbz	x1,  1f
+	mov	x0, #ARM_EXCEPTION_IRQ
+	ret
+
+1:
+	add	x18, x0, #VCPU_CONTEXT
+
+	/*
+	 * TODO: *Performance Optimized*
+	 * No need to save and restore all of the gp regs.
+	 * Only when gp regs changed by mmio or other operation,
+	 * should the gp regs be saved and restored.
+	 */
+	// Restore guest regs x0-x30, sp_el0
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(0)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(0)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(2)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(2)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(4)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(4)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(6)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(6)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(8)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(8)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(10)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(10)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(12)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(12)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(14)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(14)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(16)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(16)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(18)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(18)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(20)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(20)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(22)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(22)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(24)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(24)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(26)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(26)]
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(28)]
+	stp 	x0, x1,   [x2, #CPU_XREG_OFFSET(28)]
+	ldr	x0,    	  [x18, #CPU_XREG_OFFSET(30)]
+	str 	x0,       [x2, #CPU_XREG_OFFSET(30)]
+	mrs 	x0, 	  sp_el0
+	str 	x0, 	  [x2, #CPU_XREG_OFFSET(31)]
+
+	// Restore guest regs x0-x17
+	ldp	x0, x1,   [x18, #CPU_XREG_OFFSET(0)]
+	ldp	x2, x3,   [x18, #CPU_XREG_OFFSET(2)]
+	ldp	x4, x5,   [x18, #CPU_XREG_OFFSET(4)]
+	ldp	x6, x7,   [x18, #CPU_XREG_OFFSET(6)]
+	ldp	x8, x9,   [x18, #CPU_XREG_OFFSET(8)]
+	ldp	x10, x11, [x18, #CPU_XREG_OFFSET(10)]
+	ldp	x12, x13, [x18, #CPU_XREG_OFFSET(12)]
+	ldp	x14, x15, [x18, #CPU_XREG_OFFSET(14)]
+	ldp	x16, x17, [x18, #CPU_XREG_OFFSET(16)]
+
+	// Restore guest regs x19-x29, lr
+	restore_callee_saved_regs x18
+
+	// Restore guest reg x18
+	ldr	x18,      [x18, #CPU_XREG_OFFSET(18)]
+
+	smc #0x1
+ENDPROC(__guest_enter_s_visor_fastpath)
+
 ENTRY(__guest_exit)
 	// x0: return code
 	// x1: vcpu
@@ -115,20 +207,51 @@ ENTRY(__guest_exit)
 
 	// Retrieve the guest regs x0-x1 from the stack
 	ldp	x2, x3, [sp], #16	// x0, x1
+	stp	x0, x1, [sp, #-16]!	// return code, vcpu
+	bl 	get_s_visor_shared_buf // change x0, x1, x2
+	ldp     x2, x1,   [sp], #16     // return_code, vcpu
 
-	// Store the guest regs x0-x1 and x4-x18
-	stp	x2, x3,   [x1, #CPU_XREG_OFFSET(0)]
-	stp	x4, x5,   [x1, #CPU_XREG_OFFSET(4)]
-	stp	x6, x7,   [x1, #CPU_XREG_OFFSET(6)]
-	stp	x8, x9,   [x1, #CPU_XREG_OFFSET(8)]
-	stp	x10, x11, [x1, #CPU_XREG_OFFSET(10)]
-	stp	x12, x13, [x1, #CPU_XREG_OFFSET(12)]
-	stp	x14, x15, [x1, #CPU_XREG_OFFSET(14)]
-	stp	x16, x17, [x1, #CPU_XREG_OFFSET(16)]
-	str	x18,      [x1, #CPU_XREG_OFFSET(18)]
+	/*
+	 * TODO: *Performance Optimized*
+	 * No need to save and restore all of the gp regs.
+	 * Only when gp regs changed by mmio or other operation,
+	 * should the gp regs be saved and restored.
+	 */
+	// Retrive guest regs x0-x30
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(0)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(0)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(2)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(2)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(4)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(4)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(6)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(6)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(8)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(8)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(10)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(10)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(12)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(12)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(14)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(14)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(16)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(16)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(18)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(18)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(20)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(20)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(22)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(22)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(24)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(24)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(26)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(26)]
+	ldp 	x3, x4,   [x0, #CPU_XREG_OFFSET(28)]
+	stp 	x3, x4,   [x1, #CPU_XREG_OFFSET(28)]
+	ldr 	x3,   [x0, #CPU_XREG_OFFSET(30)]
+	str 	x3,   [x1, #CPU_XREG_OFFSET(30)]
 
-	// Store the guest regs x19-x29, lr
-	save_callee_saved_regs x1
+	mov x0, x2
 
 	get_host_ctxt	x2, x3
 

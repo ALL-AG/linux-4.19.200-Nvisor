@@ -32,6 +32,59 @@
 #include <asm/kvm_mmio.h>
 #include <asm/thread_info.h>
 
+#define SMC_IMM_KVM_TO_S_VISOR_TRAP 0x1
+#define SMC_IMM_KVM_TO_S_VISOR_SHARED_MEMORY_REGISTER 0x10
+#define SMC_IMM_KVM_TO_S_VISOR_SHARED_MEMORY_HANDLE 0x18
+
+enum {
+	REQ_KVM_TO_S_VISOR_FLUSH_IPA = 0,
+	REQ_KVM_TO_S_VISOR_UNMAP_IPA,
+	REQ_KVM_TO_S_VISOR_REMAP_IPA,
+	REQ_KVM_TO_S_VISOR_BOOT,
+	REQ_KVM_TO_S_VISOR_SHUTDOWN,
+	REQ_KVM_TO_S_VISOR_GENERAL,
+	REQ_KVM_TO_S_VISOR_MEMCPY,
+	REQ_KVM_TO_S_VISOR_UPDATE_TOP
+};
+
+/* NOTE: KVM_SMC_UNMAP_IPA uses variable length of shared memory */
+typedef struct {
+	uint32_t sec_vm_id;
+	uint32_t vcpu_id;
+	uint32_t req_type;
+	union {
+		/* No extra info for GENERAL */;
+		struct {
+			uint64_t qemu_s1ptp;
+			uint64_t nr_vcpu;
+		} boot;
+		struct {
+			/* [start_pfn, start_pfn + nr_pages). Current granularity is 8M */
+			uint64_t src_start_pfn;
+			uint64_t dst_start_pfn;
+			uint64_t nr_pages;
+			/* ipn_list[0] -> src_start_pfn, ipn_list[1] -> src_start_pfn + 1 */
+			uint64_t ipn_list[2048];
+		} remap_ipa;
+		struct {
+			/* Tuples [start_pfn, end_pfn]. Maybe need a bitmap to batch? */
+			uint64_t ipn_ranges[0];
+		} unmap_ipa;
+		struct {
+			/* [start_pfn, start_pfn + nr_pages). Current granularity is 8M */
+			uint64_t src_start_pfn;
+			uint64_t dst_start_pfn;
+			uint64_t nr_pages;
+		} memcpy;
+		uint64_t top_pfn;
+		/* No extra info for SHUTDOWN */;
+	};
+} kvm_smc_req_t;
+
+void flush_s_visor_shadow_page_tables(void);
+void trap_s_visor_enter_guest(u32 sec_vm_id, u32 vcpu_id);
+kvm_smc_req_t *get_smc_req_region(unsigned int core_id);
+void *get_gp_reg_region(unsigned int core_id);
 #define __KVM_HAVE_ARCH_INTC_INITIALIZED
 
 #define KVM_USER_MEM_SLOTS 512
@@ -79,6 +132,9 @@ struct kvm_arch {
 
 	/* Mandated version of PSCI */
 	u32 psci_version;
+
+	/* secure vm id  */
+	u32 sec_vm_id;
 };
 
 #define KVM_NR_MEM_OBJS     40

@@ -23,6 +23,7 @@
 #include <linux/sizes.h>
 #include <linux/dma-contiguous.h>
 #include <linux/cma.h>
+#include <linux/sma.h>
 
 #ifdef CONFIG_CMA_SIZE_MBYTES
 #define CMA_SIZE_MBYTES CONFIG_CMA_SIZE_MBYTES
@@ -31,6 +32,12 @@
 #endif
 
 struct cma *dma_contiguous_default_area;
+
+struct cma *secure_memory_area;
+EXPORT_SYMBOL(secure_memory_area);
+struct device secure_memory_dev;
+EXPORT_SYMBOL(secure_memory_dev);
+
 
 /*
  * Default global CMA area size can be defined in kernel's .config.
@@ -131,15 +138,8 @@ void __init dma_contiguous_reserve(phys_addr_t limit)
 #endif
 	}
 
-	if (selected_size && !dma_contiguous_default_area) {
-		pr_debug("%s: reserving %ld MiB for global area\n", __func__,
-			 (unsigned long)selected_size / SZ_1M);
-
-		dma_contiguous_reserve_area(selected_size, selected_base,
-					    selected_limit,
-					    &dma_contiguous_default_area,
-					    fixed);
-	}
+	sec_mem_init_pools(selected_size, selected_base,
+			memblock_end_of_DRAM(), fixed);
 }
 
 /**

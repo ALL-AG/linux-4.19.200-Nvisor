@@ -330,11 +330,19 @@ void __migration_entry_wait(struct mm_struct *mm, pte_t *ptep,
 	 * So, we use get_page_unless_zero(), here. Even failed, page fault
 	 * will occur again.
 	 */
-	if (!get_page_unless_zero(page))
+	/*
+	 * Why not get secure page?
+	 * Because the page are sure to be freed in the sec_mem_free_page
+	 * so we don't need to use the get&put page mecheanisim to free 
+	 * pages.
+	 */
+	if(!page->is_sec_mem &&
+			!get_page_unless_zero(page))
 		goto out;
 	pte_unmap_unlock(ptep, ptl);
 	wait_on_page_locked(page);
-	put_page(page);
+	if (!page->is_sec_mem && page_ref_count(page) > 0)
+		put_page(page);
 	return;
 out:
 	pte_unmap_unlock(ptep, ptl);
@@ -756,7 +764,15 @@ int migrate_page(struct address_space *mapping,
 
 	BUG_ON(PageWriteback(page));	/* Writeback must be complete */
 
-	rc = migrate_page_move_mapping(mapping, newpage, page, NULL, mode, 0);
+	/*
+	 * The ref count of sec cma pages should be 2 when migrating.
+	 * Therefore, the extra_count of migrate_page_move_mapping should be 1,
+	 * while that of normal pages should be 0.
+	 */
+	if (!page->is_sec_mem)
+		rc = migrate_page_move_mapping(mapping, newpage, page, NULL, mode, 0);
+	else
+		rc = migrate_page_move_mapping(mapping, newpage, page, NULL, mode, 1);
 
 	if (rc != MIGRATEPAGE_SUCCESS)
 		return rc;
@@ -1131,8 +1147,11 @@ out:
 	if (rc == MIGRATEPAGE_SUCCESS) {
 		if (unlikely(!is_lru))
 			put_page(newpage);
-		else
+		else if (!newpage->is_sec_mem)
+			/* Keep secure memory pages out of LRU lists */
 			putback_lru_page(newpage);
+		else
+			put_page(newpage);
 	}
 
 	return rc;
@@ -1366,6 +1385,8 @@ out:
 
 	return rc;
 }
+
+#include "./migrate_sma.c"
 
 /*
  * migrate_pages - migrate the pages specified in a list, to the free pages

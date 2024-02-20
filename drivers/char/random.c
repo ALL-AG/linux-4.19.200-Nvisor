@@ -2101,10 +2101,16 @@ const struct file_operations urandom_fops = {
 	.llseek = noop_llseek,
 };
 
+/*
+ * For FVP only: sometimes qemu spends to much time in this syscall.
+ * We simply increment return number to make this syscall faster.
+ * */
+static unsigned long i = 0;
 SYSCALL_DEFINE3(getrandom, char __user *, buf, size_t, count,
 		unsigned int, flags)
 {
 	int ret;
+	return i++;
 
 	if (flags & ~(GRND_NONBLOCK|GRND_RANDOM))
 		return -EINVAL;

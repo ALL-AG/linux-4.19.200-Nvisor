@@ -963,6 +963,12 @@ static struct kvm_memslots *install_new_memslots(struct kvm *kvm,
 	return old_memslots;
 }
 
+u64 vm_kernel_gpa = 0x40000000;
+EXPORT_SYMBOL(vm_kernel_gpa);
+
+extern void boot_s_visor_secure_vm(int, int);
+static atomic_t sec_vm_cnt = ATOMIC_INIT(0);
+
 /*
  * Allocate some memory and give it an address in the guest physical address
  * space.
@@ -1014,6 +1020,29 @@ int __kvm_set_memory_region(struct kvm *kvm,
 
 	if (npages > KVM_MEM_MAX_NR_PAGES)
 		goto out;
+
+	if (mem->guest_phys_addr == vm_kernel_gpa) {
+		struct task_struct *vm_task;
+		struct sec_vm_info *svi;
+
+		vm_task = current->group_leader;
+		BUG_ON(vm_task->sec_vm_info);
+
+		svi = kzalloc(sizeof(*svi), GFP_KERNEL);
+		BUG_ON(!svi);
+		svi->tgid = vm_task->tgid;
+		svi->sec_hva_start = mem->userspace_addr;
+		svi->sec_hva_size = mem->memory_size;
+		atomic_set(&svi->is_exiting, 0);
+		svi->sec_pool_type = DEFAULT_POOL;
+		svi->active_cache = NULL;
+		INIT_LIST_HEAD(&svi->inactive_cache_list);
+		mutex_init(&svi->vm_lock);
+
+		vm_task->sec_vm_info = svi;
+		kvm->arch.sec_vm_id = atomic_inc_return(&sec_vm_cnt) + 1;
+		boot_s_visor_secure_vm(kvm->arch.sec_vm_id, kvm->created_vcpus);
+	}
 
 	new = old = *slot;
 

@@ -3252,6 +3252,9 @@ out_release:
 	return ret;
 }
 
+extern struct device secure_memory_dev;
+extern struct page *dma_alloc_from_contiguous(struct device *,
+        size_t, unsigned int, bool);
 /*
  * We enter with non-exclusive mmap_sem (to exclude vma changes,
  * but allow concurrent faults), and pte mapped but not yet locked.
@@ -3264,6 +3267,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	struct page *page;
 	vm_fault_t ret = 0;
 	pte_t entry;
+	struct sec_vm_info *sec_vm_info = current->group_leader->sec_vm_info;
 
 	/* File mapping without ->vm_ops ? */
 	if (vma->vm_flags & VM_SHARED)
@@ -3309,7 +3313,14 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	/* Allocate our own private page. */
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
-	page = alloc_zeroed_user_highpage_movable(vma, vmf->address);
+	if (sec_vm_info &&
+			(sec_vm_info->sec_hva_start <= vmf->address &&
+			 vmf->address < sec_vm_info->sec_hva_start + sec_vm_info->sec_hva_size)) {
+		/* TODO: support allocation from fallback pool */
+		page = sec_mem_alloc_page_local(sec_vm_info);
+	} else {
+		page = alloc_zeroed_user_highpage_movable(vma, vmf->address);
+	}
 	if (!page)
 		goto oom;
 
@@ -3347,8 +3358,22 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 
 	inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
 	page_add_new_anon_rmap(page, vma, vmf->address, false);
-	mem_cgroup_commit_charge(page, memcg, false, false);
-	lru_cache_add_active_or_unevictable(page, vma);
+	/*
+	 * Sec cma memory doesn't support cgroup.
+	 * Sec cma memory will be freed by SMA module.
+	 * Therefore, it won't go to lru cache list.
+	 * */
+	if (!page->is_sec_mem) {
+		mem_cgroup_commit_charge(page, memcg, false, false);
+		lru_cache_add_active_or_unevictable(page, vma);
+	} else {
+		/* mapped pages are guaranteed to be added in the lru list,
+		 * and later in the unmap function, ref count will drop by 1.
+		 * Therefore, we emulate this process by adding a fake ref count.
+		 */
+		get_page(page);
+	}
+
 setpte:
 	set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
 

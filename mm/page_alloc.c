@@ -4455,10 +4455,13 @@ EXPORT_SYMBOL(get_zeroed_page);
 
 static inline void free_the_page(struct page *page, unsigned int order)
 {
-	if (order == 0)		/* Via pcp? */
+	/* cma pages should be directly freed to mitigate cma pfn busy. */
+	if (order == 0 && !page->is_sec_mem)		/* Via pcp? */
 		free_unref_page(page);
-	else
+	else {
+		page->is_sec_mem = false;
 		__free_pages_ok(page, order);
+	}
 }
 
 void __free_pages(struct page *page, unsigned int order)

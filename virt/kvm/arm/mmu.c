@@ -1582,8 +1582,14 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 	}
 
 	spin_lock(&kvm->mmu_lock);
-	if (mmu_notifier_retry(kvm, mmu_seq))
+	if (mmu_notifier_retry(kvm, mmu_seq)) {
+		/*
+	         * For an SMP S-VM during migration, if multiple vCPUs are trapped due to
+	         * stage-2 page fault, all of them should wait until the migration is done.
+	         */
+	        ret = 1;
 		goto out_unlock;
+	}
 
 	if (!hugetlb && !force_pte)
 		hugetlb = transparent_hugepage_adjust(&pfn, &fault_ipa);
@@ -1787,13 +1793,24 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu, struct kvm_run *run)
 		goto out_unlock;
 	}
 
+uma_retry:
 	ret = user_mem_abort(vcpu, fault_ipa, memslot, hva, fault_status);
+	// make sure guest page fault manage to set up stage2 page fault.
+	if (ret == 1) {
+		cond_resched();
+		goto uma_retry;
+	}
 	if (ret == 0)
 		ret = 1;
 out_unlock:
 	srcu_read_unlock(&vcpu->kvm->srcu, idx);
 	return ret;
 }
+
+extern bool is_migrating;
+extern uint32_t migrate_sec_vm_id;
+extern uint32_t nr_migrate_pages;
+extern uint64_t migrate_ipns[2048];
 
 static int handle_hva_to_gpa(struct kvm *kvm,
 			     unsigned long start,
@@ -1806,6 +1823,12 @@ static int handle_hva_to_gpa(struct kvm *kvm,
 	struct kvm_memslots *slots;
 	struct kvm_memory_slot *memslot;
 	int ret = 0;
+
+	if (is_migrating) {
+		if (!migrate_sec_vm_id) {
+			migrate_sec_vm_id = kvm->arch.sec_vm_id;
+		}
+	}
 
 	slots = kvm_memslots(kvm);
 
@@ -1821,6 +1844,11 @@ static int handle_hva_to_gpa(struct kvm *kvm,
 			continue;
 
 		gpa = hva_to_gfn_memslot(hva_start, memslot) << PAGE_SHIFT;
+		if (is_migrating) {
+			/* Batch IPNs here */
+			migrate_ipns[nr_migrate_pages++] = (gpa >> PAGE_SHIFT);
+		}
+
 		ret |= handler(kvm, gpa, (u64)(hva_end - hva_start), data);
 	}
 

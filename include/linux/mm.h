@@ -93,7 +93,7 @@ extern int mmap_rnd_compat_bits __read_mostly;
  * related to the physical page in case of virtualization.
  */
 #ifndef mm_forbids_zeropage
-#define mm_forbids_zeropage(X)	(0)
+#define mm_forbids_zeropage(X)	(1)
 #endif
 
 /*

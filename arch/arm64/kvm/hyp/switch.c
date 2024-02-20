@@ -506,6 +506,7 @@ int kvm_vcpu_run_vhe(struct kvm_vcpu *vcpu)
 {
 	struct kvm_cpu_context *host_ctxt;
 	struct kvm_cpu_context *guest_ctxt;
+	void* gp_regs = get_gp_reg_region(smp_processor_id());
 	u64 exit_code;
 
 	host_ctxt = vcpu->arch.host_cpu_context;
@@ -522,9 +523,11 @@ int kvm_vcpu_run_vhe(struct kvm_vcpu *vcpu)
 
 	__set_guest_arch_workaround_state(vcpu);
 
+	trap_s_visor_enter_guest(vcpu->kvm->arch.sec_vm_id, vcpu->vcpu_id);
+
 	do {
 		/* Jump in the fire! */
-		exit_code = __guest_enter(vcpu, host_ctxt);
+		exit_code = __guest_enter_s_visor_fastpath(vcpu, host_ctxt, gp_regs);
 
 		/* And we're baaack! */
 	} while (fixup_guest_exit(vcpu, &exit_code));
